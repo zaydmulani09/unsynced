@@ -48,7 +48,8 @@ fn workload(p: Pattern, profile: Profile) -> Trace {
 
 /// The config must always be the old or the new version, and the new one once "saved" was printed.
 fn checker(crash: &Crash) -> Result<(), String> {
-    let got = std::fs::read_to_string(crash.dir.join("config")).map_err(|e| format!("config missing: {e}"))?;
+    let got =
+        std::fs::read_to_string(crash.dir.join("config")).map_err(|e| format!("config missing: {e}"))?;
     let acked = crash.marks.iter().any(|m| m == "saved");
     match got.as_str() {
         NEW => Ok(()),
