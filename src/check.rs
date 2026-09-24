@@ -14,7 +14,7 @@ use serde::Serialize;
 
 use crate::Error;
 use crate::crash::Search;
-use crate::model::{Micro, Profile, Program, compile, split};
+use crate::model::{Micro, MicroOp, Profile, Program, compile, split};
 use crate::trace::{Entry, Op, Trace, Tree};
 
 /// Everything that controls a check.
@@ -28,7 +28,8 @@ pub struct Options {
     pub max_states: usize,
     /// Checker processes/threads to run at once.
     pub jobs: usize,
-    /// Minimize and explain at most this many distinct vulnerabilities.
+    /// Minimize at most this many failing states; the rest are attributed to
+    /// the vulnerabilities found so far when they match one.
     pub explain: usize,
 }
 
@@ -40,7 +41,7 @@ impl Default for Options {
             search: Search::default(),
             max_states: 20_000,
             jobs: std::thread::available_parallelism().map_or(4, |n| n.get()),
-            explain: 8,
+            explain: 16,
         }
     }
 }
@@ -146,6 +147,13 @@ where
     result
 }
 
+struct Group {
+    key: (Kind, Vec<String>),
+    vuln: Vulnerability,
+    /// Minimized lost-op sets attributed to this group.
+    causes: Vec<Vec<usize>>,
+}
+
 struct Job {
     point: usize,
     persisted: Vec<bool>,
@@ -189,7 +197,7 @@ where
                     loop {
                         let i = next.fetch_add(1, Ordering::Relaxed);
                         let Some(job) = jobs.get(i) else { break };
-                        match self.run_tree(&p.materialize(&job.persisted), job.point, &dir) {
+                        match self.run_tree(&p.materialize(&job.persisted), job.point, &dir, true) {
                             Ok(r) => *results[i].lock().unwrap() = Some(r),
                             Err(e) => {
                                 io_error.lock().unwrap().get_or_insert(e);
@@ -212,27 +220,40 @@ where
             self.cache.lock().unwrap().insert(job.key, r);
         }
 
-        // 3. Minimize failures into distinct vulnerabilities. Simplest first.
+        // 3. Minimize failures (simplest first) and group them by root cause:
+        //    the kind of bug and the files whose lost operations trigger it.
         failing.sort_by_key(|j| (j.point, j.persisted.iter().filter(|p| !**p).count()));
-        let mut vulns: Vec<(Vec<usize>, Vulnerability)> = Vec::new();
+        let mut groups: Vec<Group> = Vec::new();
+        let mut minimized = 0;
         let dir = self.scratch.join("min");
         for job in &failing {
             let lost = self.lost_ops(&job.persisted);
-            if let Some((_, v)) = vulns.iter_mut().find(|(sig, _)| sig.iter().all(|o| lost.contains(o))) {
-                v.occurrences += 1;
+            let covers = |sig: &Vec<usize>| !sig.is_empty() && sig.iter().all(|o| lost.contains(o));
+            if let Some(g) = groups.iter_mut().find(|g| g.causes.iter().any(covers)) {
+                g.vuln.occurrences += 1;
                 continue;
             }
-            if vulns.len() >= opts.explain {
+            if minimized == opts.explain {
                 continue;
             }
+            minimized += 1;
             let (persisted, message) = self.minimize(job.point, job.persisted.clone(), &dir)?;
-            let sig = self.lost_ops(&persisted);
-            match vulns.iter_mut().find(|(s, _)| *s == sig) {
-                Some((_, v)) => v.occurrences += 1,
-                None => {
-                    let v = self.explain(job.point, &persisted, message);
-                    vulns.push((sig, v));
+            // A durability bug disappears once nothing has been acknowledged.
+            let durability =
+                p.marks_before[job.point] > 0 && self.verdict(job.point, &persisted, &dir, false)?.is_ok();
+            let vuln = self.explain(job.point, &persisted, message, durability);
+            let cause = self.lost_ops(&persisted);
+            let mut files: Vec<String> =
+                cause.iter().filter_map(|&o| self.trace.ops[o].path()).map(String::from).collect();
+            files.sort();
+            files.dedup();
+            let key = (vuln.kind, files);
+            match groups.iter_mut().find(|g| g.key == key) {
+                Some(g) => {
+                    g.vuln.occurrences += 1;
+                    g.causes.push(cause);
                 }
+                None => groups.push(Group { key, vuln, causes: vec![cause] }),
             }
         }
 
@@ -243,28 +264,40 @@ where
             states: jobs.len(),
             truncated,
             failures: failing.len(),
-            vulnerabilities: vulns.into_iter().map(|(_, v)| v).collect(),
+            vulnerabilities: groups.into_iter().map(|g| g.vuln).collect(),
         })
     }
 
-    fn run_tree(&self, tree: &Tree, point: usize, dir: &Path) -> std::io::Result<Result<(), String>> {
+    fn run_tree(
+        &self,
+        tree: &Tree,
+        point: usize,
+        dir: &Path,
+        with_marks: bool,
+    ) -> std::io::Result<Result<(), String>> {
         if dir.exists() {
             std::fs::remove_dir_all(dir)?;
         }
         tree.write_to(dir)?;
         let p = &self.program;
-        let marks = &p.marks[..p.marks_before[point]];
+        let marks = if with_marks { &p.marks[..p.marks_before[point]] } else { &[] };
         Ok((self.checker)(&Crash { dir, point, marks }))
     }
 
     /// Check one persisted-set, through the cache.
-    fn verdict(&self, point: usize, persisted: &[bool], dir: &Path) -> std::io::Result<Result<(), String>> {
+    fn verdict(
+        &self,
+        point: usize,
+        persisted: &[bool],
+        dir: &Path,
+        with_marks: bool,
+    ) -> std::io::Result<Result<(), String>> {
         let tree = self.program.materialize(persisted);
-        let key = (hash(&tree), self.program.marks_before[point]);
+        let key = (hash(&tree), if with_marks { self.program.marks_before[point] } else { 0 });
         if let Some(r) = self.cache.lock().unwrap().get(&key) {
             return Ok(r.clone());
         }
-        let r = self.run_tree(&tree, point, dir)?;
+        let r = self.run_tree(&tree, point, dir, with_marks)?;
         self.cache.lock().unwrap().insert(key, r.clone());
         Ok(r)
     }
@@ -278,7 +311,7 @@ where
         dir: &Path,
     ) -> std::io::Result<(Vec<bool>, String)> {
         let p = &self.program;
-        let mut message = self.verdict(point, &persisted, dir)?.err().unwrap_or_default();
+        let mut message = self.verdict(point, &persisted, dir, true)?.err().unwrap_or_default();
         let mut try_add = |persisted: &mut Vec<bool>, add: &dyn Fn(usize) -> bool| -> std::io::Result<()> {
             let mut trial = persisted.clone();
             for (j, t) in trial.iter_mut().enumerate() {
@@ -286,7 +319,7 @@ where
             }
             p.close(point, &mut trial);
             if trial != *persisted
-                && let Err(m) = self.verdict(point, &trial, dir)?
+                && let Err(m) = self.verdict(point, &trial, dir, true)?
             {
                 *persisted = trial;
                 message = m;
@@ -315,7 +348,7 @@ where
         OpRef { index, op: self.trace.ops[index].to_string() }
     }
 
-    fn explain(&self, point: usize, persisted: &[bool], message: String) -> Vulnerability {
+    fn explain(&self, point: usize, persisted: &[bool], message: String, durability: bool) -> Vulnerability {
         let p = &self.program;
         let lost_micro: Vec<usize> = (0..persisted.len()).filter(|&j| !persisted[j]).collect();
         let lost = self.lost_ops(persisted);
@@ -334,6 +367,8 @@ where
         let kind = if lost_micro.is_empty() {
             survived.clear();
             Kind::NonAtomic
+        } else if durability {
+            Kind::Unsynced
         } else if torn {
             Kind::TornWrite
         } else if !survived.is_empty() {
@@ -341,7 +376,7 @@ where
         } else {
             Kind::Unsynced
         };
-        let hint = self.hint(kind, lost_micro.first().map(|&j| &p.micro[j]), &survived);
+        let hint = self.hint(kind, point, lost_micro.first().map(|&j| &p.micro[j]), &survived);
         Vulnerability {
             kind,
             crash_point: point,
@@ -354,7 +389,7 @@ where
         }
     }
 
-    fn hint(&self, kind: Kind, first: Option<&crate::model::MicroOp>, survived: &[usize]) -> String {
+    fn hint(&self, kind: Kind, point: usize, first: Option<&MicroOp>, survived: &[usize]) -> String {
         let Some(first) = first else {
             return "the checker rejects this state even with every operation persisted: the \
                     workload's own on-disk state is inconsistent here (or the checker is wrong)"
@@ -364,6 +399,25 @@ where
         let shown = |s: &str| {
             if s.is_empty() { ".".to_string() } else { s.to_string() }
         };
+        if kind == Kind::Unsynced {
+            let p = &self.program;
+            let ack = match p.marks_before[point] {
+                0 => String::new(),
+                n => format!(" and before acknowledging ({:?})", p.marks[n - 1].trim()),
+            };
+            return match &first.m {
+                Micro::Write { .. } | Micro::SetLen { .. } => {
+                    format!("fsync `{}` after `{op}`{ack}", shown(op.path().unwrap_or("")))
+                }
+                Micro::Rename { .. } | Micro::Link { .. } | Micro::Unlink { .. } => {
+                    let changed = match op {
+                        Op::Rename { to, .. } => to.as_str(),
+                        _ => op.path().unwrap_or(""),
+                    };
+                    format!("fsync the directory `{}` after `{op}`{ack}", shown(split(changed).0))
+                }
+            };
+        }
         if kind == Kind::TornWrite {
             return format!(
                 "`{op}` spans several blocks and a crash can persist only some of them; \
@@ -459,7 +513,9 @@ impl fmt::Display for Report {
             }
             let msg = v.message.trim();
             if !msg.is_empty() {
-                let msg: String = msg.lines().take(6).collect::<Vec<_>>().join("\n                ");
+                // The end of a checker's output (e.g. a traceback's last line) says the most.
+                let lines: Vec<&str> = msg.lines().collect();
+                let msg = lines[lines.len().saturating_sub(3)..].join("\n                ");
                 writeln!(f, "  checker said  {msg}")?;
             }
             writeln!(f, "  fix           {}", v.hint)?;

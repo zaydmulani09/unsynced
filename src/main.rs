@@ -28,7 +28,7 @@ OPTIONS:
   --exhaustive N        try every subset when <= N micro-ops are in flight (default 10)
   --samples N           random subsets per crash point beyond that (default 32)
   --seed N              seed for those samples
-  --explain N           minimize and explain up to N vulnerabilities (default 8)
+  --explain N           minimize up to N failing states to find root causes (default 16)
   --json                print the report as JSON
 
 EXIT STATUS: 0 no bugs found, 1 bugs found, 2 error";
