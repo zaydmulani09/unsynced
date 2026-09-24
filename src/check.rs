@@ -466,6 +466,11 @@ where
 
     fn hint(&self, kind: Kind, point: usize, first: Option<&MicroOp>, survived: &[usize]) -> String {
         let Some(first) = first else {
+            if point == 0 {
+                return "the checker rejects the initial state, before any operation ran: \
+                        the checker (or the initial directory) is wrong"
+                    .into();
+            }
             let step =
                 point.checked_sub(1).map_or("the start".to_string(), |i| format!("`{}`", self.trace.ops[i]));
             return format!(
