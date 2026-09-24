@@ -18,9 +18,11 @@
 #![forbid(unsafe_code)]
 #![allow(dead_code)]
 
+mod crash;
 mod model;
 mod trace;
 
+pub use crash::Search;
 pub use model::Profile;
 pub use trace::{Entry, Op, Trace, Tree};
 
