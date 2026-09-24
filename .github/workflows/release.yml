@@ -1,0 +1,26 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+
+jobs:
+  linux-binary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --target x86_64-unknown-linux-musl
+      - name: Upload to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          name=unsynced-${GITHUB_REF_NAME}-x86_64-linux
+          cp target/x86_64-unknown-linux-musl/release/unsynced "$name"
+          tar czf "$name.tar.gz" "$name"
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file CHANGELOG.md
+          gh release upload "$GITHUB_REF_NAME" "$name.tar.gz" --clobber
