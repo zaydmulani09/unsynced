@@ -14,14 +14,36 @@
 //!    then **minimize** each failure to the operations whose loss causes it
 //!    and explain the fix.
 //!
+//! ```no_run
+//! # fn main() -> Result<(), unsynced::Error> {
+//! use std::io::Write;
+//! let rec = unsynced::Recorder::new("/tmp/app")?;
+//! let mut f = rec.create("config.tmp")?;
+//! f.write_all(b"v2")?;
+//! rec.rename("config.tmp", "config")?;
+//! rec.mark("saved v2");
+//! let trace = rec.finish();
+//!
+//! let report = unsynced::check(&trace, &unsynced::Options::default(), |crash| {
+//!     let got = std::fs::read(crash.dir.join("config")).unwrap_or_default();
+//!     let saved = crash.marks.iter().any(|m| m == "saved v2");
+//!     match (saved, got.as_slice()) {
+//!         (true, b"v2") | (false, b"v2" | b"") => Ok(()),
+//!         _ => Err(format!("config = {got:?}")),
+//!     }
+//! })?;
+//! println!("{report}");
+//! # Ok(()) }
+//! ```
 
 #![forbid(unsafe_code)]
-#![allow(dead_code)]
 
+mod check;
 mod crash;
 mod model;
 mod trace;
 
+pub use check::{Crash, Kind, OpRef, Options, Report, Vulnerability, check};
 pub use crash::Search;
 pub use model::Profile;
 pub use trace::{Entry, Op, Trace, Tree};
