@@ -227,6 +227,11 @@ fsync pattern as *corrupting* under `posix` but only *non-durable* under
 - **Search.** Beyond 10 in-flight micro-ops per crash point the search samples
   instead of enumerating, so a clean report is strong evidence, not a proof.
   `--exhaustive`, `--samples` and `--max-states` trade time for coverage.
+- **Scale.** Every candidate state is materialized and hashed, so cost grows
+  with ops × in-flight window × data size. A few hundred ops enumerate in well
+  under a second; 2,000 appends with an fsync every 50 take about 20 s (82k
+  unique states) before the checker runs. Record a focused workload, not a
+  whole test suite.
 - **Model.** `fdatasync` is treated as `fsync`. Drives that ignore flushes,
   and file systems other than the two profiles (XFS, btrfs, APFS, NTFS),
   aren't modeled.

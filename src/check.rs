@@ -350,10 +350,7 @@ where
         dir: &Path,
         with_marks: bool,
     ) -> std::io::Result<Result<(), String>> {
-        if dir.exists() {
-            std::fs::remove_dir_all(dir)?;
-        }
-        tree.write_to(dir)?;
+        tree.sync_to(dir)?;
         let p = &self.program;
         let marks = if with_marks { &p.marks[..p.marks_before[point]] } else { &[] };
         Ok((self.checker)(&Crash { dir, point, marks }))

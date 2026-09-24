@@ -120,6 +120,31 @@ impl Tree {
         }
         Ok(())
     }
+
+    /// Make `root` hold exactly this tree, rewriting only what differs.
+    /// Much cheaper than deleting and recreating it when states are similar.
+    // ponytail: symlinks and special files a checker leaves behind are not removed.
+    pub fn sync_to(&self, root: &Path) -> io::Result<()> {
+        let current = Tree::load(root)?;
+        // Children sort after their parents, so reverse order removes them first.
+        for (path, have) in current.entries.iter().rev() {
+            match (have, self.entries.get(path)) {
+                (Entry::Dir, Some(Entry::Dir)) | (Entry::File(_), Some(Entry::File(_))) => {}
+                (Entry::Dir, _) => fs::remove_dir_all(root.join(path))?,
+                (Entry::File(_), _) => fs::remove_file(root.join(path))?,
+            }
+        }
+        fs::create_dir_all(root)?;
+        for (path, want) in &self.entries {
+            match (want, current.entries.get(path)) {
+                (Entry::Dir, Some(Entry::Dir)) => {}
+                (Entry::File(d), Some(Entry::File(c))) if d == c => {}
+                (Entry::Dir, _) => fs::create_dir_all(root.join(path))?,
+                (Entry::File(d), _) => fs::write(root.join(path), d)?,
+            }
+        }
+        Ok(())
+    }
 }
 
 fn load_into(dir: &Path, prefix: &str, tree: &mut Tree) -> io::Result<()> {
