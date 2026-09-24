@@ -233,7 +233,7 @@ fn run_checker(cmd: &str, crash: &Crash, timeout: Duration) -> Result<(), String
     let output = String::from_utf8_lossy(&std::fs::read(&out).unwrap_or_default()).into_owned();
     match status {
         Some(s) if s.success() => Ok(()),
-        Some(s) => Err(if output.trim().is_empty() { format!("checker exited with {s}") } else { output }),
+        Some(s) => Err(if output.trim().is_empty() { format!("checker failed ({s})") } else { output }),
         None => Err(format!("checker timed out after {}s", timeout.as_secs())),
     }
 }
