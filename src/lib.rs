@@ -42,6 +42,7 @@ mod check;
 mod crash;
 mod model;
 mod record;
+pub mod strace;
 mod trace;
 
 pub use check::{Crash, Kind, OpRef, Options, Report, Vulnerability, check};
@@ -59,13 +60,15 @@ pub enum Error {
     /// A trace op that cannot apply to the state before it (e.g. writing a
     /// file that does not exist).
     Model { op: usize, msg: String },
+    /// Recording with strace failed or its output could not be understood.
+    Strace(String),
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::Io(e) => write!(f, "{e}"),
-            Error::Trace(m) => f.write_str(m),
+            Error::Trace(m) | Error::Strace(m) => f.write_str(m),
             Error::Model { op, msg } => write!(f, "trace op #{op} ({msg})"),
         }
     }
