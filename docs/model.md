@@ -106,6 +106,16 @@ of lost operations that is sufficient for the failure. It is then classified:
 
 Failures are grouped by `(kind, files involved)`.
 
+## Crashes during recovery
+
+With `check_with_recovery` (CLI: `--recover`), each crash state is repaired by
+the recovery function, which returns the trace of its own writes, with the
+crash state as its initial snapshot. Each distinct recovery trace is then
+explored like a workload: crash it at every point, run recovery again on the
+result, and verify against the marks of the *first* crash. A recovery that
+passes this survives a second crash at any point. Deeper nesting (a crash
+during the second recovery) is not explored.
+
 ## What is not modeled
 
 - Writes through `mmap`, `fallocate`, `copy_file_range`, hard and symbolic
@@ -113,4 +123,3 @@ Failures are grouped by `(kind, files involved)`.
 - `fdatasync` is treated as `fsync`.
 - Drives that lie about flushes, and file systems other than the two profiles
   (btrfs, XFS, APFS, NTFS semantics differ).
-- Crashes during recovery: the checker's own writes are not explored.
