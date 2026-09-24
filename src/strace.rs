@@ -38,7 +38,9 @@ pub fn record(root: &Path, cmd: &[String]) -> Result<(Trace, Vec<String>), Error
         .arg("--")
         .args(cmd)
         .status()
-        .map_err(|e| Error::Strace(format!("cannot run strace ({e}); install it (e.g. apt install strace)")))?;
+        .map_err(|e| {
+            Error::Strace(format!("cannot run strace ({e}); install it (e.g. apt install strace)"))
+        })?;
     let text = std::fs::read(&log).map(|b| String::from_utf8_lossy(&b).into_owned());
     let _ = std::fs::remove_file(&log);
     let text = text.map_err(|e| Error::Strace(format!("strace produced no log: {e}")))?;
@@ -56,19 +58,28 @@ pub fn parse(log: &str, root: &Path, cwd: &Path, initial: &Tree) -> Result<(Vec<
     let mut st = State::new(root, cwd, initial);
     let mut pending: HashMap<u32, String> = HashMap::new();
     for (n, raw) in log.lines().enumerate() {
-        let Some((pid, rest)) = split_pid(raw) else { continue };
+        let Some((pid, rest)) = split_pid(raw) else {
+            continue;
+        };
         let line = if let Some(head) = rest.strip_suffix("<unfinished ...>") {
             pending.insert(pid, head.trim_end().to_string());
             continue;
         } else if let Some(tail) = rest.strip_prefix("<... ") {
-            let Some(head) = pending.remove(&pid) else { continue };
-            let Some(i) = tail.find("resumed>") else { continue };
+            let Some(head) = pending.remove(&pid) else {
+                continue;
+            };
+            let Some(i) = tail.find("resumed>") else {
+                continue;
+            };
             head + &tail[i + "resumed>".len()..]
         } else {
             rest.to_string()
         };
-        let Some(call) = parse_call(&line) else { continue };
-        st.apply(pid, &call).map_err(|e| Error::Strace(format!("strace log line {}: {e}\n  {raw}", n + 1)))?;
+        let Some(call) = parse_call(&line) else {
+            continue;
+        };
+        st.apply(pid, &call)
+            .map_err(|e| Error::Strace(format!("strace log line {}: {e}\n  {raw}", n + 1)))?;
     }
     Ok((st.ops, st.warnings))
 }
@@ -380,7 +391,9 @@ impl State {
                         self.resolve(pid, dirfd, &p)
                     }
                 };
-                let Some(rel) = self.rel(&abs) else { return Ok(()) };
+                let Some(rel) = self.rel(&abs) else {
+                    return Ok(());
+                };
                 if flags.contains("O_TMPFILE") {
                     self.warn(format!("O_TMPFILE in {rel} is not modeled"));
                     return Ok(());
@@ -506,7 +519,8 @@ impl State {
                         self.ops.push(Op::Rename { from: f, to: t });
                     }
                     (Some(f), None) => self.remove(f),
-                    (None, Some(t)) => self.warn(format!("{t} was moved in from outside the root; its content is not modeled")),
+                    (None, Some(t)) => self
+                        .warn(format!("{t} was moved in from outside the root; its content is not modeled")),
                     (None, None) => {}
                 }
             }
@@ -530,15 +544,17 @@ impl State {
                 }
             }
             "link" | "linkat" | "symlink" | "symlinkat" | "fallocate" | "copy_file_range" | "sendfile"
-            | "sendfile64" | "splice" => {
-                if c.args.iter().any(|a| self.arg_touches_root(pid, a)) {
-                    self.warn(format!("{} under the root is not modeled", c.name));
-                }
+            | "sendfile64" | "splice"
+                if c.args.iter().any(|a| self.arg_touches_root(pid, a)) =>
+            {
+                self.warn(format!("{} under the root is not modeled", c.name));
             }
-            "mmap" | "mmap2" => {
-                if arg(2).contains("PROT_WRITE") && arg(3).contains("MAP_SHARED") && self.fd_rel(arg(4)).is_some() {
-                    self.warn("writes through a shared writable mmap are invisible to unsynced".into());
-                }
+            "mmap" | "mmap2"
+                if arg(2).contains("PROT_WRITE")
+                    && arg(3).contains("MAP_SHARED")
+                    && self.fd_rel(arg(4)).is_some() =>
+            {
+                self.warn("writes through a shared writable mmap are invisible to unsynced".into());
             }
             "chdir" => {
                 let abs = self.path_arg(pid, None, arg(0));
@@ -579,7 +595,8 @@ impl State {
     }
 
     fn arg_touches_root(&self, pid: u32, arg: &str) -> bool {
-        self.fd_rel(arg).is_some() || (arg.starts_with('"') && self.rel(&self.path_arg(pid, None, arg)).is_some())
+        self.fd_rel(arg).is_some()
+            || (arg.starts_with('"') && self.rel(&self.path_arg(pid, None, arg)).is_some())
     }
 
     fn remove(&mut self, rel: String) {
@@ -677,8 +694,10 @@ mod tests {
 1 write(7</r/n>, "\x43", 1) = 1
 "#;
         let (ops, _) = run(log);
-        let offsets: Vec<u64> =
-            ops.iter().filter_map(|o| if let Op::Write { offset, .. } = o { Some(*offset) } else { None }).collect();
+        let offsets: Vec<u64> = ops
+            .iter()
+            .filter_map(|o| if let Op::Write { offset, .. } = o { Some(*offset) } else { None })
+            .collect();
         assert_eq!(offsets, vec![0, 1, 0]);
     }
 }

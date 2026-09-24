@@ -42,13 +42,35 @@ impl std::str::FromStr for Profile {
 
 #[derive(Debug, Clone)]
 pub(crate) enum Micro {
-    Link { parent: Ino, name: String, ino: Ino },
-    Unlink { parent: Ino, name: String },
-    Rename { from: Ino, from_name: String, to: Ino, to_name: String, ino: Ino, replaces: bool },
-    Write { ino: Ino, offset: u64, data: Vec<u8> },
+    Link {
+        parent: Ino,
+        name: String,
+        ino: Ino,
+    },
+    Unlink {
+        parent: Ino,
+        name: String,
+    },
+    Rename {
+        from: Ino,
+        from_name: String,
+        to: Ino,
+        to_name: String,
+        ino: Ino,
+        replaces: bool,
+    },
+    Write {
+        ino: Ino,
+        offset: u64,
+        data: Vec<u8>,
+    },
     /// `keep_tail`: a size extension caused by a write (bytes already written
     /// past the old end become visible) as opposed to a truncate (zero-fill).
-    SetLen { ino: Ino, len: u64, keep_tail: bool },
+    SetLen {
+        ino: Ino,
+        len: u64,
+        keep_tail: bool,
+    },
 }
 
 impl Micro {
@@ -70,7 +92,10 @@ pub(crate) struct MicroOp {
 pub(crate) enum Node {
     Dir(BTreeMap<String, Ino>),
     /// `buf` may run past `len`: bytes written whose size update did not persist.
-    File { buf: Vec<u8>, len: u64 },
+    File {
+        buf: Vec<u8>,
+        len: u64,
+    },
 }
 
 /// An inode-level file system image. Inode 0 is the root directory.
@@ -177,7 +202,9 @@ impl Fs {
         if std::mem::replace(&mut seen[ino], true) {
             return; // a crash state can make a directory reachable twice
         }
-        let Node::Dir(entries) = &self.nodes[ino] else { return };
+        let Node::Dir(entries) = &self.nodes[ino] else {
+            return;
+        };
         for (name, &child) in entries {
             let path = join(prefix, name);
             match &self.nodes[child] {
@@ -241,11 +268,8 @@ pub(crate) fn compile(trace: &Trace, profile: Profile, block: u64) -> Result<Pro
                         .lookup(parent)
                         .filter(|&p| matches!(v.nodes[p], Node::Dir(_)))
                         .ok_or_else(|| err("parent directory does not exist".into()))?;
-                    let node = if dir {
-                        Node::Dir(BTreeMap::new())
-                    } else {
-                        Node::File { buf: Vec::new(), len: 0 }
-                    };
+                    let node =
+                        if dir { Node::Dir(BTreeMap::new()) } else { Node::File { buf: Vec::new(), len: 0 } };
                     let ino = v.nodes.len();
                     v.nodes.push(node.clone());
                     base.nodes.push(node);
@@ -310,8 +334,8 @@ pub(crate) fn compile(trace: &Trace, profile: Profile, block: u64) -> Result<Pro
         }
 
         // Register the new micro-ops with what would flush them.
-        for j in start..micro.len() {
-            match &micro[j].m {
+        for (j, mo) in micro.iter().enumerate().skip(start) {
+            match &mo.m {
                 Micro::Write { ino, .. } | Micro::SetLen { ino, .. } => {
                     pending_data.entry(*ino).or_default().push(j)
                 }
@@ -321,7 +345,7 @@ pub(crate) fn compile(trace: &Trace, profile: Profile, block: u64) -> Result<Pro
                 // POSIX only promises a rename is durable once the target directory is synced.
                 Micro::Rename { to, .. } => pending_dir.entry(*to).or_default().push(j),
             }
-            if micro[j].m.is_meta() {
+            if mo.m.is_meta() {
                 pending_meta.push(j);
             }
         }

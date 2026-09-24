@@ -271,7 +271,12 @@ where
 
     /// Greedily re-persist lost micro-ops (whole ops first, then single
     /// micro-ops) as long as the state still fails.
-    fn minimize(&self, point: usize, mut persisted: Vec<bool>, dir: &Path) -> std::io::Result<(Vec<bool>, String)> {
+    fn minimize(
+        &self,
+        point: usize,
+        mut persisted: Vec<bool>,
+        dir: &Path,
+    ) -> std::io::Result<(Vec<bool>, String)> {
         let p = &self.program;
         let mut message = self.verdict(point, &persisted, dir)?.err().unwrap_or_default();
         let mut try_add = |persisted: &mut Vec<bool>, add: &dyn Fn(usize) -> bool| -> std::io::Result<()> {
@@ -300,10 +305,8 @@ where
     }
 
     fn lost_ops(&self, persisted: &[bool]) -> Vec<usize> {
-        let mut ops: Vec<usize> = (0..persisted.len())
-            .filter(|&j| !persisted[j])
-            .map(|j| self.program.micro[j].op)
-            .collect();
+        let mut ops: Vec<usize> =
+            (0..persisted.len()).filter(|&j| !persisted[j]).map(|j| self.program.micro[j].op).collect();
         ops.dedup();
         ops
     }
@@ -324,7 +327,9 @@ where
         survived.dedup();
         let torn = lost.iter().any(|&o| {
             matches!(self.trace.ops[o], Op::Write { .. })
-                && (0..persisted.len()).any(|j| persisted[j] && p.micro[j].op == o && matches!(p.micro[j].m, Micro::Write { .. }))
+                && (0..persisted.len()).any(|j| {
+                    persisted[j] && p.micro[j].op == o && matches!(p.micro[j].m, Micro::Write { .. })
+                })
         });
         let kind = if lost_micro.is_empty() {
             survived.clear();
@@ -356,7 +361,9 @@ where
                 .into();
         };
         let op = &self.trace.ops[first.op];
-        let shown = |s: &str| if s.is_empty() { ".".to_string() } else { s.to_string() };
+        let shown = |s: &str| {
+            if s.is_empty() { ".".to_string() } else { s.to_string() }
+        };
         if kind == Kind::TornWrite {
             return format!(
                 "`{op}` spans several blocks and a crash can persist only some of them; \
@@ -386,7 +393,9 @@ where
                     (Kind::Reordering, None) => format!(
                         "`{op}` can reach disk after later writes; fsync `{path}` before anything that depends on it"
                     ),
-                    _ => format!("`{op}` was not durable at the crash; fsync `{path}` before acknowledging it"),
+                    _ => {
+                        format!("`{op}` was not durable at the crash; fsync `{path}` before acknowledging it")
+                    }
                 }
             }
             _ => format!("`{op}` was lost in the crash"),

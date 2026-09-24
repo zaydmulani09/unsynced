@@ -110,13 +110,17 @@ fn run(raw: Vec<String>) -> Result<ExitCode, Box<dyn std::error::Error>> {
             Ok(ExitCode::SUCCESS)
         }
         "check" => {
-            let [bundle] = a.positional.as_slice() else { return Err("`check` needs one BUNDLE".into()) };
+            let [bundle] = a.positional.as_slice() else {
+                return Err("`check` needs one BUNDLE".into());
+            };
             let check = a.check.clone().ok_or("`check` needs --check CMD")?;
             let trace = Trace::load(Path::new(bundle))?;
             report(&trace, &check, &a)
         }
         "show" => {
-            let [bundle] = a.positional.as_slice() else { return Err("`show` needs one BUNDLE".into()) };
+            let [bundle] = a.positional.as_slice() else {
+                return Err("`show` needs one BUNDLE".into());
+            };
             let trace = Trace::load(Path::new(bundle))?;
             println!("initial state: {} entries", trace.initial.entries.len());
             for (i, op) in trace.ops.iter().enumerate() {
@@ -174,9 +178,7 @@ fn run_checker(cmd: &str, crash: &Crash, timeout: Duration) -> Result<(), String
     let (marks, out) = (sibling("marks"), sibling("out"));
     let io = |e: std::io::Error| format!("could not run checker: {e}");
     std::fs::write(&marks, crash.marks.concat()).map_err(io)?;
-    let cmd = cmd
-        .replace("{dir}", &crash.dir.to_string_lossy())
-        .replace("{marks}", &marks.to_string_lossy());
+    let cmd = cmd.replace("{dir}", &crash.dir.to_string_lossy()).replace("{marks}", &marks.to_string_lossy());
     let log = std::fs::File::create(&out).map_err(io)?;
     let mut sh = if cfg!(windows) {
         let mut c = Command::new("cmd");

@@ -59,7 +59,10 @@ pub enum Error {
     Trace(String),
     /// A trace op that cannot apply to the state before it (e.g. writing a
     /// file that does not exist).
-    Model { op: usize, msg: String },
+    Model {
+        op: usize,
+        msg: String,
+    },
     /// Recording with strace failed or its output could not be understood.
     Strace(String),
 }

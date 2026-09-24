@@ -76,10 +76,9 @@ impl Program {
             return;
         }
         // Journaled metadata commits in order: persisted metadata is a prefix.
-        if let Some(last) = (0..persisted.len()).rev().find(|&j| persisted[j] && self.micro[j].m.is_meta())
-        {
-            for j in 0..last {
-                persisted[j] |= self.micro[j].m.is_meta();
+        if let Some(last) = (0..persisted.len()).rev().find(|&j| persisted[j] && self.micro[j].m.is_meta()) {
+            for (j, p) in persisted.iter_mut().enumerate().take(last) {
+                *p |= self.micro[j].m.is_meta();
             }
         }
         // data=ordered: a size extension commits only after its data; a
@@ -93,11 +92,11 @@ impl Program {
                 _ => {}
             }
         }
-        for j in 0..persisted.len() {
+        for (j, p) in persisted.iter_mut().enumerate() {
             if let Micro::Write { ino, .. } = self.micro[j].m
                 && flush_before.get(&ino).is_some_and(|&until| j < until)
             {
-                persisted[j] = true;
+                *p = true;
             }
         }
     }
