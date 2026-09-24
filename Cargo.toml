@@ -1,0 +1,20 @@
+[package]
+name = "unsynced"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Crash-consistency explorer: enumerates every disk state a power loss can leave behind and checks your program recovers from each."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/zaydmulani09/unsynced"
+readme = "README.md"
+keywords = ["crash-consistency", "fsync", "testing", "durability", "storage"]
+categories = ["development-tools::testing", "filesystem", "database"]
+exclude = ["/.github"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[[bin]]
+name = "unsynced"
+path = "src/main.rs"
