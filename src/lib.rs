@@ -41,11 +41,13 @@
 mod check;
 mod crash;
 mod model;
+mod record;
 mod trace;
 
 pub use check::{Crash, Kind, OpRef, Options, Report, Vulnerability, check};
 pub use crash::Search;
 pub use model::Profile;
+pub use record::{RecFile, Recorder};
 pub use trace::{Entry, Op, Trace, Tree};
 
 /// Errors from loading, compiling or checking a trace.
