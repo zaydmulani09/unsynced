@@ -18,8 +18,10 @@
 #![forbid(unsafe_code)]
 #![allow(dead_code)]
 
+mod model;
 mod trace;
 
+pub use model::Profile;
 pub use trace::{Entry, Op, Trace, Tree};
 
 /// Errors from loading, compiling or checking a trace.
@@ -28,6 +30,9 @@ pub enum Error {
     Io(std::io::Error),
     /// A malformed trace file.
     Trace(String),
+    /// A trace op that cannot apply to the state before it (e.g. writing a
+    /// file that does not exist).
+    Model { op: usize, msg: String },
 }
 
 impl std::fmt::Display for Error {
@@ -35,6 +40,7 @@ impl std::fmt::Display for Error {
         match self {
             Error::Io(e) => write!(f, "{e}"),
             Error::Trace(m) => f.write_str(m),
+            Error::Model { op, msg } => write!(f, "trace op #{op} ({msg})"),
         }
     }
 }
