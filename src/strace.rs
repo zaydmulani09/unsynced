@@ -11,7 +11,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::Error;
 use crate::trace::{Entry, Op, Trace, Tree};
@@ -19,9 +20,21 @@ use crate::trace::{Entry, Op, Trace, Tree};
 /// Largest single write we can capture; larger ones are reported as errors.
 pub const MAX_WRITE: usize = 1 << 24;
 
+/// The result of [`record`].
+#[derive(Debug)]
+pub struct Recording {
+    pub trace: Trace,
+    /// Operations that could not be modeled.
+    pub warnings: Vec<String>,
+    /// Whether the traced command exited successfully.
+    pub success: bool,
+}
+
 /// Run `cmd` under strace with `root` as the directory under test.
-/// Returns the trace, plus warnings about operations that could not be modeled.
-pub fn record(root: &Path, cmd: &[String]) -> Result<(Trace, Vec<String>), Error> {
+///
+/// The command's stdout is discarded; what it writes there is recorded as marks.
+pub fn record(root: &Path, cmd: &[String]) -> Result<Recording, Error> {
+    static RUNS: AtomicUsize = AtomicUsize::new(0);
     if cmd.is_empty() {
         return Err(Error::Strace("no workload command given".into()));
     }
@@ -29,7 +42,11 @@ pub fn record(root: &Path, cmd: &[String]) -> Result<(Trace, Vec<String>), Error
     let initial = Tree::load(root)?;
     let root = std::fs::canonicalize(root)?;
     let cwd = std::fs::canonicalize(std::env::current_dir()?)?;
-    let log = std::env::temp_dir().join(format!("unsynced-strace-{}.log", std::process::id()));
+    let log = std::env::temp_dir().join(format!(
+        "unsynced-strace-{}-{}.log",
+        std::process::id(),
+        RUNS.fetch_add(1, Ordering::Relaxed)
+    ));
     let status = Command::new("strace")
         .args(["-f", "-qq", "-y", "-xx", "-s", &MAX_WRITE.to_string()])
         .args(["-e", "trace=%file,%desc,%process,%memory,sync"])
@@ -37,6 +54,7 @@ pub fn record(root: &Path, cmd: &[String]) -> Result<(Trace, Vec<String>), Error
         .arg(&log)
         .arg("--")
         .args(cmd)
+        .stdout(Stdio::null())
         .status()
         .map_err(|e| {
             Error::Strace(format!("cannot run strace ({e}); install it (e.g. apt install strace)"))
@@ -44,11 +62,8 @@ pub fn record(root: &Path, cmd: &[String]) -> Result<(Trace, Vec<String>), Error
     let text = std::fs::read(&log).map(|b| String::from_utf8_lossy(&b).into_owned());
     let _ = std::fs::remove_file(&log);
     let text = text.map_err(|e| Error::Strace(format!("strace produced no log: {e}")))?;
-    let (ops, mut warnings) = parse(&text, &root, &cwd, &initial)?;
-    if !status.success() {
-        warnings.push(format!("workload exited with {status}"));
-    }
-    Ok((Trace { initial, ops }, warnings))
+    let (ops, warnings) = parse(&text, &root, &cwd, &initial)?;
+    Ok(Recording { trace: Trace { initial, ops }, warnings, success: status.success() })
 }
 
 /// Parse an `strace -f -y -xx` log into ops on paths relative to `root`.

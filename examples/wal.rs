@@ -1,15 +1,19 @@
 //! A tiny append-only key-value log, checked by unsynced.
 //!
-//! The naive version fsyncs every append yet still has two crash bugs:
-//! records have no checksum (a torn append recovers as garbage), and the
-//! log's directory entry is never made durable (acknowledged puts vanish).
-//! The fixed version checksums records and fsyncs the directory once.
+//! 1. The naive log fsyncs every append yet still has two crash bugs: records
+//!    have no checksum (a torn append recovers as garbage), and the log's
+//!    directory entry is never made durable (acknowledged puts vanish).
+//! 2. The fixed log checksums records and fsyncs the directory once.
+//! 3. Recovery must cut a torn tail off before new appends. Rewriting the log
+//!    with its valid records looks equivalent to truncating it, but only the
+//!    truncate survives a second crash *during* recovery.
 //!
 //!     cargo run --example wal
 
 use std::io::Write;
+use std::path::Path;
 
-use unsynced::{Crash, Options, Recorder, Trace, check};
+use unsynced::{Crash, Options, Recorder, Trace, check, check_with_recovery};
 
 const PUTS: usize = 3;
 
@@ -35,22 +39,23 @@ fn encode(payload: &str, checksum: bool) -> Vec<u8> {
 }
 
 /// Read records until one is incomplete (or fails its checksum).
-fn recover(mut log: &[u8], checksum: bool) -> Vec<String> {
+/// Returns them and the length of the valid prefix.
+fn read_log(log: &[u8], checksum: bool) -> (Vec<String>, usize) {
     let header = if checksum { 8 } else { 4 };
-    let mut out = Vec::new();
-    while log.len() >= header {
-        let len = u32::from_le_bytes(log[..4].try_into().unwrap()) as usize;
-        if len == 0 || log.len() < header + len {
+    let (mut out, mut at) = (Vec::new(), 0);
+    while log.len() - at >= header {
+        let len = u32::from_le_bytes(log[at..at + 4].try_into().unwrap()) as usize;
+        if len == 0 || log.len() - at < header + len {
             break;
         }
-        let payload = &log[header..header + len];
-        if checksum && crc32(payload) != u32::from_le_bytes(log[4..8].try_into().unwrap()) {
+        let payload = &log[at + header..at + header + len];
+        if checksum && crc32(payload) != u32::from_le_bytes(log[at + 4..at + 8].try_into().unwrap()) {
             break;
         }
         out.push(String::from_utf8_lossy(payload).into_owned());
-        log = &log[header + len..];
+        at += header + len;
     }
-    out
+    (out, at)
 }
 
 fn value(i: usize) -> String {
@@ -74,10 +79,10 @@ fn workload(fixed: bool) -> std::io::Result<Trace> {
     Ok(rec.finish())
 }
 
-/// Recovery must return a prefix of the puts containing every acknowledged one.
+/// The log must hold a prefix of the puts containing every acknowledged one.
 fn checker(crash: &Crash, fixed: bool) -> Result<(), String> {
     let bytes = std::fs::read(crash.dir.join("kv.log")).unwrap_or_default();
-    let got = recover(&bytes, fixed);
+    let (got, _) = read_log(&bytes, fixed);
     for (i, v) in got.iter().enumerate() {
         if *v != value(i) {
             return Err(format!("record {i} recovered as garbage ({:?}...)", &v[..v.len().min(12)]));
@@ -89,10 +94,39 @@ fn checker(crash: &Crash, fixed: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// Cut a torn tail off the log, recording what we do.
+fn repair(dir: &Path, safe: bool) -> std::io::Result<Trace> {
+    let rec = Recorder::new(dir)?;
+    let bytes = std::fs::read(dir.join("kv.log")).unwrap_or_default();
+    let (_, valid) = read_log(&bytes, true);
+    if valid < bytes.len() {
+        if safe {
+            let mut f = rec.open("kv.log")?;
+            f.set_len(valid as u64)?;
+            f.sync_all()?;
+        } else {
+            let mut f = rec.create("kv.log")?; // truncates: the old records are now at risk
+            f.write_all(&bytes[..valid])?;
+            f.sync_all()?;
+        }
+    }
+    Ok(rec.finish())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     for fixed in [false, true] {
         println!("== {} log", if fixed { "fixed" } else { "naive" });
         let report = check(&workload(fixed)?, &Options::default(), |c| checker(c, fixed))?;
+        println!("{report}");
+    }
+    for safe in [false, true] {
+        println!("== fixed log, tail repair by {}", if safe { "truncation" } else { "rewriting" });
+        let report = check_with_recovery(
+            &workload(true)?,
+            &Options::default(),
+            |dir| repair(dir, safe).map_err(|e| e.to_string()),
+            |c| checker(c, true),
+        )?;
         println!("{report}");
     }
     Ok(())

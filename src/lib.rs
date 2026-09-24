@@ -45,7 +45,7 @@ mod record;
 pub mod strace;
 mod trace;
 
-pub use check::{Crash, Kind, OpRef, Options, Report, Vulnerability, check};
+pub use check::{Crash, Kind, OpRef, Options, Report, Vulnerability, check, check_with_recovery};
 pub use crash::Search;
 pub use model::Profile;
 pub use record::{RecFile, Recorder};

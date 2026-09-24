@@ -100,3 +100,19 @@ fn record_then_check_roundtrips_a_bundle() {
     let (code, out) = unsynced(&["check", bundle.to_str().unwrap(), "--check", "true"]);
     assert_eq!(code, 0, "{out}");
 }
+
+#[test]
+fn recovery_that_rewrites_in_place_is_caught() {
+    if !have_strace() {
+        eprintln!("strace not installed; skipping");
+        return;
+    }
+    // Two records; the first is synced and acknowledged. Recovery "cleans" the
+    // log by rewriting it in place, which a second crash can interrupt.
+    let workload = "printf 'a\n' >> {dir}/log && sync && echo saved && printf 'b\n' >> {dir}/log";
+    let recover = "grep -x -e a -e b {dir}/log > {dir}/clean; cat {dir}/clean > {dir}/log; rm {dir}/clean";
+    let check = "grep -qx a {dir}/log || ! grep -q saved {marks}";
+    let (code, out) = unsynced(&["run", "--check", check, "--recover", recover, "--", "sh", "-c", workload]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("during recovery") && out.contains("recovery ran and crashed again"), "{out}");
+}

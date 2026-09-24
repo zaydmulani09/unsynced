@@ -67,6 +67,8 @@ pub struct Report {
     pub states: usize,
     /// True if `max_states` cut the enumeration short.
     pub truncated: bool,
+    /// States reached by crashing during recovery (see [`check_with_recovery`]).
+    pub recovery_states: usize,
     /// States the checker rejected.
     pub failures: usize,
     pub vulnerabilities: Vec<Vulnerability>,
@@ -116,6 +118,12 @@ pub struct Vulnerability {
     pub hint: String,
     /// Failing states attributed to this vulnerability.
     pub occurrences: usize,
+    /// Files whose lost operations trigger it.
+    pub files: Vec<String>,
+    /// `Some(k)`: a second crash, during recovery from a first crash after
+    /// `k` workload ops. `crash_after`, `lost` and `survived` then refer to
+    /// the recovery's own operations.
+    pub in_recovery: Option<usize>,
 }
 
 type Key = (u64, usize);
@@ -136,15 +144,80 @@ where
     F: Fn(&Crash) -> Result<(), String> + Sync,
 {
     let program = compile(trace, opts.profile, opts.block_size)?;
+    static RUNS: AtomicUsize = AtomicUsize::new(0);
     let scratch = std::env::temp_dir().join(format!(
-        "unsynced-{}-{}",
+        "unsynced-{}-{}-{}",
         std::process::id(),
+        RUNS.fetch_add(1, Ordering::Relaxed),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
     ));
     let engine = Engine { trace, program, checker, cache: Mutex::new(HashMap::new()), scratch };
     let result = engine.run(opts);
     let _ = std::fs::remove_dir_all(&engine.scratch);
     result
+}
+
+/// Like [`check`], but recovery is crash-tested too.
+///
+/// Every crash state is handed to `recover`, which repairs the directory in
+/// place and returns the [`Trace`] of what it did (use a [`Recorder`](crate::Recorder),
+/// or [`strace::record`](crate::strace::record)); then `verify` judges the
+/// result. Because recovery writes, it can itself be interrupted: each
+/// distinct recovery trace is explored like a workload, crashing it at every
+/// point, recovering again, and verifying against the *original* crash's marks.
+pub fn check_with_recovery<R, V>(
+    trace: &Trace,
+    opts: &Options,
+    recover: R,
+    verify: V,
+) -> Result<Report, Error>
+where
+    R: Fn(&Path) -> Result<Trace, String> + Sync,
+    V: Fn(&Crash) -> Result<(), String> + Sync,
+{
+    let seen = Mutex::new(std::collections::HashSet::new());
+    let recoveries = Mutex::new(Vec::new());
+    let mut report = check(trace, opts, |c| {
+        let t = recover(c.dir).map_err(|e| format!("recovery failed: {e}"))?;
+        let writes = t.ops.iter().any(|o| !matches!(o, Op::Mark { .. }));
+        if writes && seen.lock().unwrap().insert(trace_hash(&t)) {
+            recoveries.lock().unwrap().push((c.point, c.marks.to_vec(), t));
+        }
+        verify(c)
+    })?;
+    let mut recoveries = recoveries.into_inner().unwrap();
+    recoveries.sort_by_key(|(point, _, t)| (*point, trace_hash(t)));
+    for (point, marks, t) in recoveries {
+        let budget = opts.max_states.saturating_sub(report.recovery_states);
+        if budget == 0 {
+            report.truncated = true;
+            break;
+        }
+        let sub = check(&t, &Options { max_states: budget, ..opts.clone() }, |c| {
+            recover(c.dir).map_err(|e| format!("recovery failed: {e}"))?;
+            verify(&Crash { dir: c.dir, point, marks: &marks })
+        })?;
+        report.recovery_states += sub.states;
+        report.failures += sub.failures;
+        report.truncated |= sub.truncated;
+        for mut v in sub.vulnerabilities {
+            v.in_recovery = Some(point);
+            let same =
+                |w: &&mut Vulnerability| w.in_recovery.is_some() && w.kind == v.kind && w.files == v.files;
+            match report.vulnerabilities.iter_mut().find(same) {
+                Some(w) => w.occurrences += v.occurrences,
+                None => report.vulnerabilities.push(v),
+            }
+        }
+    }
+    Ok(report)
+}
+
+fn trace_hash(t: &Trace) -> u64 {
+    let mut h = DefaultHasher::new();
+    hash(&t.initial).hash(&mut h);
+    t.ops.hash(&mut h);
+    h.finish()
 }
 
 struct Group {
@@ -241,12 +314,13 @@ where
             // A durability bug disappears once nothing has been acknowledged.
             let durability =
                 p.marks_before[job.point] > 0 && self.verdict(job.point, &persisted, &dir, false)?.is_ok();
-            let vuln = self.explain(job.point, &persisted, message, durability);
+            let mut vuln = self.explain(job.point, &persisted, message, durability);
             let cause = self.lost_ops(&persisted);
             let mut files: Vec<String> =
                 cause.iter().filter_map(|&o| self.trace.ops[o].path()).map(String::from).collect();
             files.sort();
             files.dedup();
+            vuln.files = files.clone();
             let key = (vuln.kind, files);
             match groups.iter_mut().find(|g| g.key == key) {
                 Some(g) => {
@@ -263,6 +337,7 @@ where
             crash_points: p.op_end.len(),
             states: jobs.len(),
             truncated,
+            recovery_states: 0,
             failures: failing.len(),
             vulnerabilities: groups.into_iter().map(|g| g.vuln).collect(),
         })
@@ -368,6 +443,7 @@ where
             survived.clear();
             Kind::NonAtomic
         } else if durability {
+            survived.clear(); // what else persisted is beside the point
             Kind::Unsynced
         } else if torn {
             Kind::TornWrite
@@ -386,14 +462,19 @@ where
             message,
             hint,
             occurrences: 1,
+            files: Vec::new(),
+            in_recovery: None,
         }
     }
 
     fn hint(&self, kind: Kind, point: usize, first: Option<&MicroOp>, survived: &[usize]) -> String {
         let Some(first) = first else {
-            return "the checker rejects this state even with every operation persisted: the \
-                    workload's own on-disk state is inconsistent here (or the checker is wrong)"
-                .into();
+            let step =
+                point.checked_sub(1).map_or("the start".to_string(), |i| format!("`{}`", self.trace.ops[i]));
+            return format!(
+                "the state right after {step} is rejected even with every operation persisted, so \
+                 this update is not atomic: build the new state in a temp file, fsync it, and rename it into place"
+            );
         };
         let op = &self.trace.ops[first.op];
         let shown = |s: &str| {
@@ -475,9 +556,13 @@ impl fmt::Display for Report {
             Profile::Posix => "posix",
             Profile::Ext4Ordered => "ext4-ordered",
         };
+        let recovery = match self.recovery_states {
+            0 => String::new(),
+            n => format!(" + {n} during recovery"),
+        };
         writeln!(
             f,
-            "{} ops, {} crash points, {} unique crash states checked ({profile} model){}",
+            "{} ops, {} crash points, {} unique crash states checked{recovery} ({profile} model){}",
             self.ops,
             self.crash_points,
             self.states,
@@ -500,16 +585,24 @@ impl fmt::Display for Report {
                 Kind::Unsynced => "unsynced",
                 Kind::NonAtomic => "non-atomic update",
             };
-            writeln!(f, "\n[{}] {kind} ({} failing states)", n + 1, v.occurrences)?;
+            let during = if v.in_recovery.is_some() { " during recovery" } else { "" };
+            writeln!(f, "\n[{}] {kind}{during} ({} failing states)", n + 1, v.occurrences)?;
+            // Ops of a recovery trace are numbered separately: prefix them with `r`.
+            let r = if let Some(k) = v.in_recovery {
+                writeln!(f, "  first crash   after {k} workload ops; recovery ran and crashed again")?;
+                "r"
+            } else {
+                ""
+            };
             match &v.crash_after {
-                Some(o) => writeln!(f, "  crash after   #{} {}", o.index, o.op)?,
+                Some(o) => writeln!(f, "  crash after   {r}#{} {}", o.index, o.op)?,
                 None => writeln!(f, "  crash before the first op")?,
             }
             for o in &v.lost {
-                writeln!(f, "  lost          #{} {}", o.index, o.op)?;
+                writeln!(f, "  lost          {r}#{} {}", o.index, o.op)?;
             }
             for o in &v.survived {
-                writeln!(f, "  but persisted #{} {}", o.index, o.op)?;
+                writeln!(f, "  but persisted {r}#{} {}", o.index, o.op)?;
             }
             let msg = v.message.trim();
             if !msg.is_empty() {

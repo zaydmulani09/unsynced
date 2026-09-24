@@ -8,9 +8,9 @@ const USAGE: &str = "\
 unsynced - find crash-consistency bugs by exploring every disk state a power loss can leave
 
 USAGE:
-  unsynced run    [--dir DIR] [--init DIR] --check CMD [OPTIONS] -- WORKLOAD...
+  unsynced run    [--dir DIR] [--init DIR] --check CMD [--recover CMD] [OPTIONS] -- WORKLOAD...
   unsynced record [--dir DIR] [--init DIR] -o BUNDLE -- WORKLOAD...
-  unsynced check  BUNDLE --check CMD [OPTIONS]
+  unsynced check  BUNDLE --check CMD [--recover CMD] [OPTIONS]
   unsynced show   BUNDLE
 
 `run` and `record` trace WORKLOAD with strace (Linux). WORKLOAD operates on the
@@ -18,6 +18,9 @@ directory under test: --dir (default: a fresh temp dir), seeded from --init.
 CMD runs once per crash state and must exit 0 iff that state is acceptable.
 In both, {dir} expands to the directory and {marks} to a file holding what
 WORKLOAD printed to stdout before the crash (also $UNSYNCED_DIR, $UNSYNCED_MARKS).
+
+With --recover, CMD repairs each crash state before --check runs, and is itself
+traced (Linux) and crashed at every point: recovery must survive a second crash.
 
 OPTIONS:
   --profile posix|ext4  persistence model (default posix: the weakest legal)
@@ -51,6 +54,7 @@ struct Args {
     init: Option<PathBuf>,
     out: Option<PathBuf>,
     check: Option<String>,
+    recover: Option<String>,
     timeout: u64,
     json: bool,
     opts: Options,
@@ -73,6 +77,7 @@ fn parse(mut raw: Vec<String>) -> Result<Args, String> {
             "--init" => a.init = Some(val("--init")?.into()),
             "-o" | "--out" => a.out = Some(val("-o")?.into()),
             "--check" => a.check = Some(val("--check")?),
+            "--recover" => a.recover = Some(val("--recover")?),
             "--profile" => a.opts.profile = val("--profile")?.parse()?,
             "--block-size" => a.opts.block_size = num("--block-size", val("--block-size")?)?,
             "--jobs" => a.opts.jobs = num("--jobs", val("--jobs")?)?,
@@ -154,16 +159,31 @@ fn record(a: &Args) -> Result<(Trace, PathBuf), Box<dyn std::error::Error>> {
     let dir = std::fs::canonicalize(&dir)?;
     let shown = dir.to_string_lossy().into_owned();
     let workload: Vec<String> = a.workload.iter().map(|w| w.replace("{dir}", &shown)).collect();
-    let (trace, warnings) = unsynced::strace::record(&dir, &workload)?;
-    for w in warnings {
+    let rec = unsynced::strace::record(&dir, &workload)?;
+    for w in rec.warnings {
         eprintln!("warning: {w}");
     }
-    Ok((trace, dir))
+    if !rec.success {
+        eprintln!("warning: the workload failed; checking what it did anyway");
+    }
+    Ok((rec.trace, dir))
 }
 
 fn report(trace: &Trace, check: &str, a: &Args) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let timeout = Duration::from_secs(a.timeout);
-    let report = unsynced::check(trace, &a.opts, |crash| run_checker(check, crash, timeout))?;
+    let checker = |crash: &Crash| run_checker(check, crash, timeout);
+    let report = match &a.recover {
+        None => unsynced::check(trace, &a.opts, checker)?,
+        Some(cmd) => {
+            let recover = |dir: &Path| {
+                let cmd = cmd.replace("{dir}", &dir.to_string_lossy());
+                let rec = unsynced::strace::record(dir, &["sh".into(), "-c".into(), cmd.clone()])
+                    .map_err(|e| e.to_string())?;
+                if rec.success { Ok(rec.trace) } else { Err(format!("`{cmd}` failed")) }
+            };
+            unsynced::check_with_recovery(trace, &a.opts, recover, checker)?
+        }
+    };
     if a.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {

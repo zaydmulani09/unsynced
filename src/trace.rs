@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::Error;
 
 /// One file-system operation, as the workload issued it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Op {
     /// Create a new, empty regular file.
