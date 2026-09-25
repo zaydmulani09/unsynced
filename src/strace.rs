@@ -446,7 +446,7 @@ impl State {
                     }
                     return Ok(());
                 };
-                let offset = if c.name.starts_with('p') {
+                let offset = if c.name.starts_with('p') && !(c.name == "pwritev2" && arg(3) == "-1") {
                     let off = arg(3);
                     off.parse().map_err(|_| format!("bad offset `{off}`"))?
                 } else {
@@ -696,6 +696,43 @@ mod tests {
                 Op::Mark { text: "ok\n".into() },
             ]
         );
+    }
+
+    #[test]
+    fn pwritev2_offset_minus_one_uses_and_advances_file_offset() {
+        let log = r#"1 openat(AT_FDCWD</r>, "\x6e", O_WRONLY|O_CREAT, 0600) = 3</r/n>
+1 pwritev2(3</r/n>, [{iov_base="\x61\x62", iov_len=2}], 1, -1, 0) = 2
+1 pwritev2(3</r/n>, [{iov_base="\x63", iov_len=1}], 1, -1, 0) = 1
+"#;
+        let (ops, warnings) = run(log);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            ops,
+            vec![
+                Op::Create { path: "n".into() },
+                Op::Write { path: "n".into(), offset: 0, data: b"ab".to_vec() },
+                Op::Write { path: "n".into(), offset: 2, data: b"c".to_vec() },
+            ]
+        );
+    }
+
+    #[test]
+    fn pwritev2_offset_minus_one_honors_append() {
+        let log = r#"1 openat(AT_FDCWD</r>, "\x6f\x6c\x64", O_WRONLY|O_APPEND) = 3</r/old>
+1 pwritev2(3</r/old>, [{iov_base="\x61", iov_len=1}], 1, -1, 0) = 1
+"#;
+        let (ops, warnings) = run(log);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(ops, vec![Op::Write { path: "old".into(), offset: 5, data: b"a".to_vec() }]);
+    }
+
+    #[test]
+    fn pwritev2_rejects_other_invalid_offsets() {
+        let log = r#"1 openat(AT_FDCWD</r>, "\x6f\x6c\x64", O_WRONLY) = 3</r/old>
+1 pwritev2(3</r/old>, [{iov_base="\x61", iov_len=1}], 1, -2, 0) = 1
+"#;
+        let error = parse(log, Path::new("/r"), Path::new("/r"), &Tree::default()).unwrap_err();
+        assert!(error.to_string().contains("bad offset `-2`"), "{error}");
     }
 
     #[test]
