@@ -222,8 +222,9 @@ fsync pattern as *corrupting* under `posix` but only *non-durable* under
 ## Limitations
 
 - **Frontends.** Tracing arbitrary programs needs Linux and strace. Writes
-  through `mmap`, `fallocate`, `copy_file_range`, and hard or symbolic links
-  aren't modeled; unsynced warns when a workload uses them under the root.
+  through `mmap`, `fallocate`, `copy_file_range`, symbolic links, and files
+  created with `O_TMPFILE` aren't modeled; unsynced warns when a workload uses
+  them under the root.
 - **Search.** Beyond 10 in-flight micro-ops per crash point the search samples
   instead of enumerating, so a clean report is strong evidence, not a proof.
   `--exhaustive`, `--samples` and `--max-states` trade time for coverage.

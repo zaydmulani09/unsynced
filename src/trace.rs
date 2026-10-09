@@ -45,10 +45,12 @@ pub enum Op {
     /// (by default, its stdout). Checkers see the marks emitted before the crash,
     /// which is how they know what was acknowledged as durable.
     Mark { text: String },
+    /// Give the existing file `from` a second name `to`, which must not exist yet (a hard link).
+    Link { from: String, to: String },
 }
 
 impl Op {
-    /// The path this op is about, if any (the source path for renames).
+    /// The path this op is about, if any (the source path for renames, the new name for links).
     pub fn path(&self) -> Option<&str> {
         match self {
             Op::Create { path }
@@ -60,6 +62,7 @@ impl Op {
             | Op::Fsync { path } => Some(path),
             Op::Rename { from, .. } => Some(from),
             Op::Sync | Op::Mark { .. } => None,
+            Op::Link { to, .. } => Some(to),
         }
     }
 }
@@ -77,6 +80,7 @@ impl std::fmt::Display for Op {
             }
             Op::Truncate { path, len } => write!(f, "truncate {} to {len}", p(path)),
             Op::Rename { from, to } => write!(f, "rename {} -> {}", p(from), p(to)),
+            Op::Link { from, to } => write!(f, "link {} -> {}", p(from), p(to)),
             Op::Unlink { path } => write!(f, "unlink {}", p(path)),
             Op::Rmdir { path } => write!(f, "rmdir {}", p(path)),
             Op::Fsync { path } => write!(f, "fsync {}", p(path)),

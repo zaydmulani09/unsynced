@@ -15,6 +15,7 @@ A trace is an initial directory snapshot plus a sequence of operations
 | `write p off data` | write bytes at an offset (appends are writes at the old end) |
 | `truncate p len` | set a file's length |
 | `rename a b` | atomically move `a` to `b`, replacing `b` |
+| `link a b` | give `a`'s file a second name `b`; `b` must not exist |
 | `unlink p`, `rmdir p` | remove a directory entry |
 | `fsync p` | `fsync`/`fdatasync` on a file or a directory |
 | `sync` | flush everything |
@@ -29,7 +30,7 @@ system, into the smallest units a file system may persist independently:
 
 | micro-op | produced by |
 |---|---|
-| `Link(dir, name, ino)` | `create`, `mkdir` |
+| `Link(dir, name, ino)` | `create`, `mkdir` (a new inode), `link` (an existing one) |
 | `Unlink(dir, name)` | `unlink`, `rmdir` |
 | `Rename(dir₁, name₁ → dir₂, name₂, ino)` | `rename` — one micro-op, so a rename is atomic |
 | `Write(ino, off, bytes)` | `write`, split at every `block_size` boundary (default 4096) |
@@ -118,8 +119,9 @@ during the second recovery) is not explored.
 
 ## What is not modeled
 
-- Writes through `mmap`, `fallocate`, `copy_file_range`, hard and symbolic
-  links: the strace frontend warns when a workload uses them under the root.
+- Writes through `mmap`, `fallocate`, `copy_file_range`, symbolic links, and
+  files created with `O_TMPFILE` (even once `linkat` gives them a name): the
+  strace frontend warns when a workload uses them under the root.
 - `fdatasync` is treated as `fsync`.
 - Drives that lie about flushes, and file systems other than the two profiles
   (btrfs, XFS, APFS, NTFS semantics differ).

@@ -539,6 +539,30 @@ impl State {
                     (None, None) => {}
                 }
             }
+            "link" | "linkat" => {
+                // The source is the fd itself (e.g. an O_TMPFILE being given a name), not a path.
+                if arg(4).contains("AT_EMPTY_PATH") {
+                    self.warn("linkat(AT_EMPTY_PATH) is not modeled".into());
+                    return Ok(());
+                }
+                let (from, to) = if c.name == "link" {
+                    (self.path_arg(pid, None, arg(0)), self.path_arg(pid, None, arg(1)))
+                } else {
+                    (self.path_arg(pid, Some(arg(0)), arg(1)), self.path_arg(pid, Some(arg(2)), arg(3)))
+                };
+                match (self.rel(&from), self.rel(&to)) {
+                    (Some(f), Some(t)) => {
+                        // Both names share one file, so they start with the same size.
+                        let size = self.sizes.get(&f).copied().unwrap_or(0);
+                        self.sizes.insert(t.clone(), size);
+                        self.ops.push(Op::Link { from: f, to: t });
+                    }
+                    (None, Some(t)) => self
+                        .warn(format!("{t} was linked in from outside the root; its content is not modeled")),
+                    // A new name outside the root changes nothing under it.
+                    (Some(_), None) | (None, None) => {}
+                }
+            }
             "unlink" | "unlinkat" | "rmdir" => {
                 let abs = match c.name.as_str() {
                     "unlinkat" => self.path_arg(pid, Some(arg(0)), arg(1)),
@@ -558,8 +582,8 @@ impl State {
                     self.ops.push(Op::Mkdir { path: rel });
                 }
             }
-            "link" | "linkat" | "symlink" | "symlinkat" | "fallocate" | "copy_file_range" | "sendfile"
-            | "sendfile64" | "splice"
+            "symlink" | "symlinkat" | "fallocate" | "copy_file_range" | "sendfile" | "sendfile64"
+            | "splice"
                 if c.args.iter().any(|a| self.arg_touches_root(pid, a)) =>
             {
                 self.warn(format!("{} under the root is not modeled", c.name));
@@ -714,5 +738,36 @@ mod tests {
             .filter_map(|o| if let Op::Write { offset, .. } = o { Some(*offset) } else { None })
             .collect();
         assert_eq!(offsets, vec![0, 1, 0]);
+    }
+
+    #[test]
+    fn records_link_and_linkat() {
+        let log = r#"100 link("\x2f\x72\x2f\x6f\x6c\x64", "\x2f\x72\x2f\x61") = 0
+100 linkat(AT_FDCWD</r>, "\x6f\x6c\x64", 3</r>, "\x62", 0) = 0
+100 linkat(AT_FDCWD</r>, "\x6f\x6c\x64", AT_FDCWD</r>, "\x61", 0) = -1 EEXIST (File exists)
+100 openat(AT_FDCWD</r>, "\x62", O_WRONLY|O_APPEND) = 4</r/b>
+100 write(4</r/b>, "\x7a", 1) = 1
+"#;
+        let (ops, warnings) = run(log);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            ops,
+            vec![
+                Op::Link { from: "old".into(), to: "a".into() },
+                Op::Link { from: "old".into(), to: "b".into() },
+                Op::Write { path: "b".into(), offset: 5, data: b"z".to_vec() }, // O_APPEND: the shared file's end
+            ]
+        );
+    }
+
+    #[test]
+    fn links_from_outside_the_root_or_by_fd_only_warn() {
+        // A nameless O_TMPFILE given a name via /proc/self/fd, and via AT_EMPTY_PATH on its fd.
+        let log = r#"100 linkat(AT_FDCWD</r>, "\x2f\x70\x72\x6f\x63\x2f\x73\x65\x6c\x66\x2f\x66\x64\x2f\x33", AT_FDCWD</r>, "\x6e", AT_SYMLINK_FOLLOW) = 0
+100 linkat(3</r/#99>(deleted), "", AT_FDCWD</r>, "\x6d", AT_EMPTY_PATH) = 0
+"#;
+        let (ops, warnings) = run(log);
+        assert!(ops.is_empty(), "{ops:?}");
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
     }
 }

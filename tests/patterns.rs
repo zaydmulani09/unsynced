@@ -108,3 +108,43 @@ fn the_correct_recipe_is_clean() {
         assert!(r.is_clean(), "{r}");
     }
 }
+
+fn link_workload(profile: Profile, dir_fsync: bool) -> Trace {
+    let dir = std::env::temp_dir().join(format!("unsynced-link-{profile:?}-{dir_fsync}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let rec = Recorder::new(&dir).unwrap();
+    let mut f = rec.create("tmp").unwrap();
+    f.write_all(b"text").unwrap();
+    f.sync_all().unwrap();
+    drop(f);
+    rec.hard_link("tmp", "final").unwrap();
+    if dir_fsync {
+        rec.sync_dir("").unwrap();
+    }
+    rec.mark("link saved");
+    rec.finish()
+}
+
+/// `final` must hold "text" once "link saved" was printed; before that it may be missing.
+fn link_checker(crash: &Crash) -> Result<(), String> {
+    let got = std::fs::read(crash.dir.join("final")).unwrap_or_default();
+    let saved = crash.marks.iter().any(|m| m == "link saved");
+    match (saved, got.as_slice()) {
+        (_, b"text") | (false, b"") => Ok(()),
+        _ => Err(format!("final = {got:?}")),
+    }
+}
+
+#[test]
+fn missing_directory_fsync_loses_link() {
+    for profile in [Profile::Posix, Profile::Ext4Ordered] {
+        let opts = Options { profile, jobs: 2, ..Options::default() };
+
+        let lost = check(&link_workload(profile, false), &opts, link_checker).unwrap();
+        assert!(!lost.is_clean(), "{lost}");
+        assert!(lost.vulnerabilities.iter().all(|v| v.kind == Kind::Unsynced), "{lost}");
+
+        let fixed = check(&link_workload(profile, true), &opts, link_checker).unwrap();
+        assert!(fixed.is_clean(), "{fixed}");
+    }
+}

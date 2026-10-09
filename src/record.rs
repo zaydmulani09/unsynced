@@ -100,6 +100,14 @@ impl Recorder {
         Ok(())
     }
 
+    /// Like [`fs::hard_link`]: give the file at `from` a second name `to`, which must not exist.
+    pub fn hard_link(&self, from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
+        let (f, t) = (self.rel(&from)?, self.rel(&to)?);
+        fs::hard_link(self.root.join(from), self.root.join(to))?;
+        self.log(Op::Link { from: f, to: t });
+        Ok(())
+    }
+
     pub fn remove_file(&self, path: impl AsRef<Path>) -> io::Result<()> {
         let rel = self.rel(&path)?;
         fs::remove_file(self.root.join(path))?;
